@@ -48,7 +48,16 @@ git clone https://github.com/ShopRunner/apparate.git
 cd apparate
 easy_install .
 ```
+or
+```
+to creste a installable file : 
+git clone https://github.com/ShopRunner/apparate.git
+cd apparate
+sudo python setup.py bdist_wheel
 
+to install:
+pip install apparate-2.2.2-py2-none-any.whl
+```
 ## Setup
 
 ### Configuration

@@ -56,17 +56,8 @@ class FileNameMatch(object):
     Matches eggs or jars for both released and snapshot versions
 
     Supported Patterns:
-      new_library-1.0.0-py3.6.egg
-      new_library-1.0.0-SNAPSHOT-py3.6.egg
-      new_library-1.0.0-SNAPSHOT-my-branch-py3.6.egg
 
-      new_library-1.0.0.egg
-      new_library-1.0.0-SNAPSHOT.egg
-      new_library-1.0.0-SNAPSHOT-my-branch.egg
-
-      new_library-1.0.0.jar
-      new_library-1.0.0-SNAPSHOT.jar
-      new_library-1.0.0-SNAPSHOT-my-branch.jar
+      library_2.11-2.4.4_0.5.7.jar
 
     library_name: string
         base name of library (e.g. 'test_library')
@@ -75,8 +66,8 @@ class FileNameMatch(object):
 
     """
     file_pattern = (
-        r'([a-zA-Z0-9-\._]+)-((\d+)\.(\d+\.\d+)'
-        r'(?:-SNAPSHOT(?:[a-zA-Z_\-\.]+)?)?)(?:-py.+)?\.(egg|jar)'
+        r'([a-zA-Z]+)_((\d+)\.(\d+))-((\d+)\.(\d+)\.(\d+))_((\d+)\.(\d+)\.(\d+))'
+        r'\.(egg|jar)'
     )
 
     def __init__(self, filename):
@@ -84,10 +75,18 @@ class FileNameMatch(object):
         try:
             self.filename = filename
             self.library_name = match.group(1)
-            self.version = match.group(2)
-            self.major_version = match.group(3)
-            self.minor_version = match.group(4)
-            self.suffix = match.group(5)
+            self.version = match.group(9)
+            self.major_version = int(match.group(10))
+            self.minor_version = int(match.group(11))
+            self.patch_version = int(match.group(12))
+            self.suffix = match.group(13)
+            self.scala_version = match.group(2)
+            self.scala_major = int(match.group(3))
+            self.scala_minor = int(match.group(4))
+            self.spark_version = match.group(5)
+            self.spark_major = int(match.group(6))
+            self.spark_minor = int(match.group(7))
+            self.spark_patch = int(match.group(8))
             if self.suffix == 'jar':
                 self.lib_type = 'java-jar'
             elif self.suffix == 'egg':
@@ -112,34 +111,50 @@ class FileNameMatch(object):
         based on version numbers only - snapshot and branch tags are ignored
         """
 
-        if other.library_name != self.library_name:
-            logger.debug(
-                'not replacable: {} != {} ()'
-                .format(other.library_name, self.library_name, other.filename)
-            )
-            return False
-        elif int(other.major_version) != int(self.major_version):
-            logger.debug(
-                'not replacable: {} != {} ({})'
-                .format(
-                    int(self.major_version),
-                    int(other.major_version),
-                    other.filename,
+        if self.library_name == other.library_name:
+            if self.major_version > other.major_version:
+                logger.info(
+                    'change in major version to {} from {}. File : {}'
+                        .format(self.major_version, other.major_version, other.filename))
+                return True
+
+            elif self.major_version < other.major_version:
+                logger.info(
+                    'not replacable major : {} < {} '
+                        .format(int(self.major_version), int(other.major_version)))
+                return False
+
+            elif (self.major_version == other.major_version) and (self.minor_version > other.minor_version):
+                logger.info(
+                    'change in minor version to {} from {}. File : {}'
+                        .format(self.minor_version, other.minor_version, other.filename))
+                return True
+
+            elif self.minor_version < other.minor_version:
+                logger.info(
+                    'not replacable minor : {} < {}'
+                        .format(int(self.minor_version), int(other.minor_version)))
+                return False
+
+            elif (self.minor_version == other.minor_version) and (self.patch_version > other.patch_version):
+                logger.info(
+                    'change in patch version to {} from {}. File : {}'
+                        .format(self.patch_version, other.patch_version, other.filename))
+                return True
+
+            else:
+                logger.info(
+                    'not replacable patch : {} < {}'
+                        .format(int(self.patch_version), int(other.patch_version))
                 )
-            )
-            return False
-        elif float(other.minor_version) >= float(self.minor_version):
-            logger.debug(
-                'not replacable: {} >= {} ({})'
-                .format(
-                    other.minor_version,
-                    self.minor_version,
-                    other.filename,
-                )
-            )
-            return False
+                return False
+
         else:
-            return True
+            logger.info(
+                'library name not same  {} -- {}'
+                    .format(other.library_name, self.library_name)
+            )
+            return False
 
 
 def load_library(filename, match, folder, token, host):
@@ -170,7 +185,8 @@ def load_library(filename, match, folder, token, host):
             auth=('token', token),
             data={
                 'libType': match.lib_type,
-                'name': '{0}-{1}'.format(match.library_name, match.version),
+                'name': '{0}_{1}-{2}_{3}.{4}'.format(match.library_name, match.scala_version, match.spark_version,
+                                                     match.version, match.suffix),
                 'folder': folder,
             },
             files={'uri': file_obj}
@@ -280,59 +296,60 @@ def get_library_mapping(logger, prod_folder, token, host):
         library_map = {}
         id_nums = {}
         for library in library_list:
-            status_res = (
-                requests
-                .get(
-                    host + '/api/1.2/libraries/status?libraryId={}'
-                    .format(library['id']),
-                    auth=('token', token),
+            if library['folder'] == prod_folder:
+                status_res = (
+                    requests
+                        .get(
+                        host + '/api/1.2/libraries/status?libraryId={}'
+                        .format(library['id']),
+                        auth=('token', token),
+                    )
                 )
-            )
-            if status_res.status_code == 200:
-                library_info = status_res.json()
-                # only do any of this for libraries in the production folder
-                if library_info['folder'] != prod_folder:
-                    logger.debug(
-                        'excluded folder: {} in {}, not prod folder ({})'
-                        .format(
-                            library_info['name'],
-                            library_info['folder'],
-                            prod_folder,
+                if status_res.status_code == 200:
+                    library_info = status_res.json()
+                    # only do any of this for libraries in the production folder
+                    if library_info['folder'] != prod_folder:
+                        logger.debug(
+                            'excluded folder: {} in {}, not prod folder ({})'
+                                .format(
+                                library_info['name'],
+                                library_info['folder'],
+                                prod_folder,
+                            )
                         )
-                    )
-                    continue
-                if library_info['libType'] == 'python-egg':
-                    full_name = library_info['name'] + '.egg'
-                elif library_info['libType'] == 'java-jar':
-                    full_name = library_info['name'] + '.jar'
+                        continue
+                    if library_info['libType'] == 'python-egg':
+                        full_name = library_info['name'] + '.egg'
+                    elif library_info['libType'] == 'java-jar':
+                        full_name = library_info['name']
+                    else:
+                        logger.debug(
+                            'excluded library type: {} is of libType {}, '
+                            'not jar or egg'
+                                .format(
+                                library_info['name'],
+                                library_info['libType'],
+                            )
+                        )
+                        continue
+                    try:
+                        name_match = FileNameMatch(full_name)
+                        # map uri to name match object
+                        library_map[basename(library_info['files'][0])] = name_match
+                        # map name to name match object and id number
+                        # we'll need the id number to clean up old libraries
+                        id_nums[library_info['name']] = {
+                            'name_match': name_match,
+                            'id_num': library_info['id'],
+                        }
+                    except FileNameError:
+                        logger.debug(
+                            'FileNameError: {} file name is not parsable'
+                                .format(full_name)
+                        )
+                        pass
                 else:
-                    logger.debug(
-                        'excluded library type: {} is of libType {}, '
-                        'not jar or egg'
-                        .format(
-                            library_info['name'],
-                            library_info['libType'],
-                        )
-                    )
-                    continue
-                try:
-                    name_match = FileNameMatch(full_name)
-                    # map uri to name match object
-                    library_map[library_info['files'][0]] = name_match
-                    # map name to name match object and id number
-                    # we'll need the id number to clean up old libraries
-                    id_nums[library_info['name']] = {
-                        'name_match': name_match,
-                        'id_num': library_info['id'],
-                    }
-                except FileNameError:
-                    logger.debug(
-                        'FileNameError: {} file name is not parsable'
-                        .format(full_name)
-                    )
-                    pass
-            else:
-                raise APIError(status_res)
+                    raise APIError(status_res)
         return library_map, id_nums
     else:
         raise APIError(res)
@@ -397,7 +414,10 @@ def update_job_libraries(
                 data=json.dumps(job_specs)
             )
             if post_res.status_code != 200:
-                raise APIError(post_res)
+                if post_res.status_code == 403:
+                    logger.info("Permission Denied for {} ".format(settings['name']))
+                else:
+                    raise APIError(post_res)
         else:
             raise APIError(get_res)
 
@@ -506,7 +526,7 @@ def update_databricks(logger, path, token, folder, update_jobs, cleanup):
             .format(match.library_name, match.version)
         )
     except APIError as err:
-        if err.code == 'http 500' and 'already exists' in err.message:
+        if (err.code == 'http 500' or err.code == 'http 409') and 'already exists' in err.message:
             logger.info(
                 'This version ({}) already exists: '.format(match.version) +
                 'if a change has been made please update your version number. '
